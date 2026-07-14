@@ -10,8 +10,10 @@ use App\Models\UserNotification;
 use App\Services\RemotePharmacySync;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use App\Events\OrderCreated;
 
@@ -143,18 +145,24 @@ public function pendingCount()
         // ID commande + numéro lisible
         $orderId    = (string) Str::uuid();
         $nextNumber = (int) (CustomerOrder::where('user_id', Auth::id())->max('number') ?? 0) + 1;
+        $prescriptionPath = $request->session()->get('prescription_path');
+        $prescriptionOriginalName = $request->session()->get('prescription_original');
 
         // 🔹 1) Sauvegarde DB avec LA PHARMACIE CHOISIE
-        $created = CustomerOrder::create([
-            'id'          => $orderId,
-            'user_id'     => Auth::id(),
-            'number'      => $nextNumber,
-            'count'       => count($items),
-            'total'       => (int) $total,
-            'status'      => 'en_attente',   // en_attente | en_cours | valide | rejete | annulee
-            'items'       => $items,         // cast JSON dans le modèle
-            'pharmacy_id' => $pharmacy->id,  // ✅ TRÈS IMPORTANT
-        ]);
+        // Assignation explicite (pas de mass assignment) : total/status/pharmacy_id
+        // sont des valeurs calculées côté serveur, jamais reprises du client.
+        $created = new CustomerOrder();
+        $created->id          = $orderId;
+        $created->user_id     = Auth::id();
+        $created->number      = $nextNumber;
+        $created->count       = count($items);
+        $created->total       = (int) $total;
+        $created->status      = 'en_attente';   // en_attente | en_cours | valide | rejete | annulee
+        $created->items       = $items;         // cast JSON dans le modèle
+        $created->pharmacy_id = $pharmacy->id;  // ✅ TRÈS IMPORTANT
+        $created->prescription_path = $prescriptionPath;
+        $created->prescription_original_name = $prescriptionOriginalName;
+        $created->save();
 
         // 🔹 1bis) Diffusion temps réel
         event(new OrderCreated($created));
@@ -186,7 +194,12 @@ public function pendingCount()
     public function show(CustomerOrder $order)
     {
         $user     = auth()->user();
-        $pharmacy = $order->pharmacy ?? $this->currentPharmacy();
+        $pharmacy = $this->currentPharmacy();
+        abort_unless($pharmacy, 403, "Aucune pharmacie rattachée.");
+
+        if (! is_null($order->pharmacy_id) && (int) $order->pharmacy_id !== (int) $pharmacy->id) {
+            abort(403, "Cette commande n’appartient pas à votre pharmacie.");
+        }
 
         // On récupère les items bruts (id, qty, price, libelle, prix, …)
         $rawItems = collect($order->items ?? []);
@@ -246,6 +259,41 @@ public function pendingCount()
             'pharmacy' => $pharmacy,
             'items'    => $items,
             'user'     => $user,
+        ]);
+    }
+
+    /**
+     * Affiche l'ordonnance téléversée dans la commande.
+     *
+     * Le fichier est stocké sur le disque privé "local" (storage/app/private,
+     * hors du lien symbolique public/storage) : il n'est jamais accessible en
+     * direct par le serveur web, uniquement via cette route après vérification
+     * que la commande appartient bien à la pharmacie connectée.
+     */
+    public function prescription(CustomerOrder $order)
+    {
+        $pharmacy = $this->currentPharmacy();
+        abort_unless($pharmacy, 403, "Aucune pharmacie rattachée.");
+
+        if (! is_null($order->pharmacy_id) && (int) $order->pharmacy_id !== (int) $pharmacy->id) {
+            abort(403, "Cette commande n’appartient pas à votre pharmacie.");
+        }
+
+        $path = trim((string) $order->prescription_path);
+        abort_if($path === '', 404, "Aucune ordonnance n’est rattachée à cette commande.");
+
+        $path = ltrim(str_replace('\\', '/', $path), '/');
+        abort_if(str_contains($path, '..') || str_starts_with($path, 'storage/'), 404);
+        abort_unless(Storage::disk('local')->exists($path), 404, "Le fichier de l’ordonnance est introuvable.");
+
+        $absolutePath = Storage::disk('local')->path($path);
+        $downloadName = $order->prescription_original_name ?: basename($path);
+        $mimeType = Storage::disk('local')->mimeType($path) ?: 'application/octet-stream';
+
+        return response()->file($absolutePath, [
+            'Content-Type' => $mimeType,
+            'Content-Disposition' => 'inline; filename="'.addslashes($downloadName).'"',
+            'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 
@@ -381,137 +429,6 @@ public function pendingCount()
             ->route('pharmacist.orders.index', ['status' => 'rejected'])
             ->with('success', "Commande #{$order->number} rejetée et notification envoyée.");
     }
-public function reports(Request $request)
-{
-    $pharmacy = $this->currentPharmacy();
-    abort_unless($pharmacy, 403, "Aucune pharmacie rattachée.");
-
-    // period = 7, 30, 90 ou "all"
-    $period = $request->query('period', '30');
-    $days   = is_numeric($period) ? (int) $period : null;
-
-    $baseQuery = CustomerOrder::where('pharmacy_id', $pharmacy->id);
-
-    // 🔹 Si "all" → on ne filtre pas par date
-    // 🔹 Sinon, on filtre sur les N derniers jours
-    if (!is_null($days) && $days > 0) {
-        $from = now()->subDays($days);
-
-        Log::info('📅 Filtre période reports()', [
-            'pharmacy_id' => $pharmacy->id,
-            'days'        => $days,
-            'from'        => $from->toDateTimeString(),
-        ]);
-
-        $baseQuery->whereDate('created_at', '>=', $from->toDateString());
-    } else {
-        Log::info('📅 Filtre période reports() sur toute l’historique', [
-            'pharmacy_id' => $pharmacy->id,
-        ]);
-    }
-
-    // ============================
-    //  Normalisation des statuts
-    // ============================
-    $statusPending   = ['en_attente', 'en_cours', 'pending'];
-    $statusValidated = ['valide', 'validated'];
-    $statusRejected  = ['rejete', 'rejected', 'annulee', 'cancelled'];
-
-    // ======================
-    //   STATISTIQUES GLOBALES
-    // ======================
-    $totalOrders = (clone $baseQuery)->count();
-    $validated   = (clone $baseQuery)->whereIn('status', $statusValidated)->count();
-    $rejected    = (clone $baseQuery)->whereIn('status', $statusRejected)->count();
-    $pending     = (clone $baseQuery)->whereIn('status', $statusPending)->count();
-    $totalAmount = (clone $baseQuery)->sum('total');
-    $avgAmount   = $totalOrders > 0 ? $totalAmount / $totalOrders : 0;
-
-    $effectivePeriod = $days ?? 'all';
-
-    $stats = [
-        'period'       => (string) $effectivePeriod,
-        'period_label' => $effectivePeriod === 'all'
-            ? "toute l’historique"
-            : "les {$effectivePeriod} derniers jours",
-        'total_orders' => $totalOrders,
-        'validated'    => $validated,
-        'rejected'     => $rejected,
-        'pending'      => $pending,
-        'total_amount' => $totalAmount,
-        'avg_amount'   => $avgAmount,
-    ];
-
-    Log::info('📊 Stats pharmacien - reports()', [
-        'pharmacy_id'   => $pharmacy->id,
-        'period'        => $stats['period'],
-        'total_orders'  => $totalOrders,
-        'validated'     => $validated,
-        'rejected'      => $rejected,
-        'pending'       => $pending,
-        'total_amount'  => $totalAmount,
-        'avg_amount'    => $avgAmount,
-    ]);
-
-    // ======================
-    //   TOP PRODUITS
-    // ======================
-
-    // 👉 Ici on utilise un TABLEAU PHP simple, pas une Collection
-    $topProductsArray = [];
-
-    (clone $baseQuery)
-        ->whereNotNull('items')
-        ->orderBy('created_at', 'desc')
-        ->chunk(100, function ($orders) use (&$topProductsArray) {
-            foreach ($orders as $order) {
-                $items = (array) ($order->items ?? []);
-
-                foreach ($items as $line) {
-                    if (!is_array($line)) {
-                        continue;
-                    }
-
-                    $id    = $line['id'] ?? $line['product_id'] ?? null;
-                    $qty   = (int)($line['qty'] ?? 1);
-                    $price = (int)($line['price'] ?? 0);
-
-                    if (!$id) {
-                        continue;
-                    }
-
-                    $key = (string) $id;
-
-                    if (!isset($topProductsArray[$key])) {
-                        $topProductsArray[$key] = [
-                            'id'      => $id,
-                            'libelle' => $line['name'] ?? $line['libelle'] ?? 'Produit #'.$id,
-                            'qty'     => 0,
-                            'amount'  => 0,
-                        ];
-                    }
-
-                    // ✅ Ici, comme c’est un tableau PHP, on peut modifier par référence
-                    $topProductsArray[$key]['qty']    += $qty;
-                    $topProductsArray[$key]['amount'] += $price * $qty;
-                }
-            }
-        });
-
-    // On retransforme en collection pour trier proprement, puis en array pour la vue
-    $topProducts = collect($topProductsArray)
-        ->sortByDesc('qty')
-        ->take(10)
-        ->values()
-        ->all();
-
-    return view('pharmacist.reports', [
-        'pharmacy'    => $pharmacy,
-        'stats'       => $stats,
-        'topProducts' => $topProducts,
-    ]);
-}
-
         /**
      * Décrémente les produits liés à la commande.
      * On essaie plusieurs colonnes possibles (JSON ou array) + on décode si string.
@@ -556,21 +473,41 @@ public function reports(Request $request)
             'ordered_qty' => $orderedQty,
         ]);
 
-        // On cherche le produit localement
+        // Décrémentation locale, verrouillée en base pour éviter toute
+        // survente si deux commandes sur le même produit sont traitées
+        // en même temps (lecture → soustraction → écriture non atomique).
         $product = null;
+        $oldQty  = null;
+        $newQty  = null;
 
-        if ($localId) {
-            $product = PharmaProduct::where('pharmacy_id', $pharmacy->id)
-                ->where(function ($q) use ($localId) {
+        DB::transaction(function () use ($pharmacy, $localId, $remoteId, $orderedQty, &$product, &$oldQty, &$newQty) {
+            $query = PharmaProduct::where('pharmacy_id', $pharmacy->id);
+
+            if ($localId) {
+                $query->where(function ($q) use ($localId) {
                     $q->where('remote_id', $localId)
                       ->orWhere('id', $localId);
-                })
-                ->first();
-        } elseif ($remoteId) {
-            $product = PharmaProduct::where('pharmacy_id', $pharmacy->id)
-                ->where('remote_id', $remoteId)
-                ->first();
-        }
+                });
+            } elseif ($remoteId) {
+                $query->where('remote_id', $remoteId);
+            } else {
+                return;
+            }
+
+            $product = $query->lockForUpdate()->first();
+
+            if (! $product) {
+                return;
+            }
+
+            $oldQty = (int) ($product->quantity ?? 0);
+            $newQty = max(0, $oldQty - $orderedQty);
+
+            $product->quantity  = $newQty;
+            $product->stock     = $newQty > 0 ? 'Disponible' : 'Rupture';
+            $product->synced_at = now();
+            $product->save();
+        });
 
         if (! $product) {
             Log::warning("❌ Produit introuvable pour la ligne", [
@@ -581,15 +518,6 @@ public function reports(Request $request)
             ]);
             continue;
         }
-
-        // Décrémentation locale
-        $oldQty = (int)($product->quantity ?? 0);
-        $newQty = max(0, $oldQty - $orderedQty);
-
-        $product->quantity  = $newQty;
-        $product->stock     = $newQty > 0 ? 'Disponible' : 'Rupture';
-        $product->synced_at = now();
-        $product->save();
 
         Log::info("✅ Produit décrémenté localement", [
             'order_id'      => $order->id,

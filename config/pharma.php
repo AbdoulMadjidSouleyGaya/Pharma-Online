@@ -31,4 +31,19 @@ return [
     */
 
     'geo_radius_meters' => (int) env('PHARMA_GEO_RADIUS', 5000),
+
+    /*
+    |--------------------------------------------------------------------------
+    | OCR des ordonnances (Tesseract / Poppler pdftoppm)
+    |--------------------------------------------------------------------------
+    |
+    | Par défaut on suppose que les deux binaires sont dans le PATH (cas d'un
+    | serveur Linux avec `apt install tesseract-ocr poppler-utils`). Sur un
+    | poste Windows où ce n'est pas le cas, renseigne le chemin complet dans
+    | .env via TESSERACT_BIN / PDFTOPPM_BIN.
+    |
+    */
+
+    'tesseract_bin' => env('TESSERACT_BIN', env('TESSERACT_PATH', 'tesseract')),
+    'pdftoppm_bin'  => env('PDFTOPPM_BIN', 'pdftoppm'),
 ];

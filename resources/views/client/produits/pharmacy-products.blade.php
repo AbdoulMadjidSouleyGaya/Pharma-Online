@@ -32,6 +32,9 @@
                                    px-5 py-3 placeholder-gray-400 text-gray-800 transition"
                             placeholder="🔍 Rechercher un produit (ex : Paracétamol)">
                     </div>
+                    @if(!empty($fromRx))
+                        <input type="hidden" name="from_rx" value="1">
+                    @endif
                     <button
                         class="md:w-48 w-full inline-flex items-center justify-center px-6 py-3
                                bg-gradient-to-r from-green-600 to-blue-600 text-white font-semibold rounded-xl
@@ -42,6 +45,13 @@
                 <p class="text-xs text-gray-500 mt-2">
                     Coche les produits disponibles que tu veux commander dans <strong>{{ $pharmacy->name }}</strong>.
                 </p>
+
+                @if(!empty($fromRx) && !empty($autoSelectedProductIds))
+                    <div class="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                        <span class="font-semibold">Ordonnance détectée :</span>
+                        {{ count($autoSelectedProductIds) }} produit(s) correspondant(s) ont été automatiquement cochés.
+                    </div>
+                @endif
             </div>
 
             {{-- Messages flash --}}
@@ -63,6 +73,10 @@
                     {{-- IMPORTANT : on envoie aussi la pharmacie choisie --}}
                     <input type="hidden" name="pharmacy_id" value="{{ $pharmacy->id }}">
 
+                    @if(!empty($autoSelectedOrderItems))
+                        <div id="auto-selected-order-items" class="hidden" data-items='@json($autoSelectedOrderItems)'></div>
+                    @endif
+
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         @foreach($products as $p)
                             @php
@@ -71,7 +85,7 @@
                                 $price = is_null($p->prix) ? 0 : (float)$p->prix;
                             @endphp
 
-                            <div class="group bg-white rounded-3xl border border-green-100 shadow-sm hover:shadow-2xl transition duration-200 overflow-hidden relative"
+                            <div class="group bg-white rounded-3xl border {{ in_array((int) $p->id, $autoSelectedProductIds ?? [], true) ? 'border-emerald-400 ring-2 ring-emerald-100' : 'border-green-100' }} shadow-sm hover:shadow-2xl transition duration-200 overflow-hidden relative"
                                  data-product
                                  data-id="{{ $p->id }}"
                                  data-price="{{ $price }}"
@@ -91,7 +105,8 @@
                                             <label class="inline-flex items-center cursor-pointer">
                                                 <input type="checkbox"
                                                        class="product-select h-5 w-5 text-green-600 rounded border-gray-300 focus:ring-green-500"
-                                                       value="{{ $p->id }}">
+                                                       value="{{ $p->id }}"
+                                                       @checked(in_array((int) $p->id, $autoSelectedProductIds ?? [], true))>
                                             </label>
                                         @endif
                                     </div>
@@ -211,30 +226,57 @@
             const selCountM  = document.getElementById('sel-count-m');
             const selTotalM  = document.getElementById('sel-total-m');
             const btnSendM   = document.getElementById('btn-send-m');
+            const autoSelectedContainer = document.getElementById('auto-selected-order-items');
+            const autoSelectedItems = autoSelectedContainer
+                ? JSON.parse(autoSelectedContainer.dataset.items || '[]')
+                : [];
 
-            if (!form || !checkboxes.length) {
-                // Rien à faire si pas de produits
+            if (!form) {
                 return;
             }
 
             function updateSummary() {
-                let items = [];
+                const itemsMap = new Map();
                 let total = 0;
 
-                checkboxes.forEach(cb => {
-                    if (cb.checked) {
-                        const card  = cb.closest('[data-product]');
-                        const price = Number(card?.dataset?.price || 0);
-                        const id    = Number(card?.dataset?.id || cb.value);
+                autoSelectedItems.forEach(item => {
+                    const id = Number(item?.id || 0);
+                    const price = Number(item?.price || 0);
 
-                        items.push({
+                    if (!id) {
+                        return;
+                    }
+
+                    itemsMap.set(id, {
+                        id: id,
+                        qty: 1,
+                        price: price,
+                    });
+                });
+
+                checkboxes.forEach(cb => {
+                    const card  = cb.closest('[data-product]');
+                    const price = Number(card?.dataset?.price || 0);
+                    const id    = Number(card?.dataset?.id || cb.value);
+
+                    if (!id) {
+                        return;
+                    }
+
+                    if (cb.checked) {
+                        itemsMap.set(id, {
                             id:    id,
-                            qty:   1,       // 1 unité par produit sélectionné
+                            qty:   1,
                             price: price,
                         });
-
-                        total += price;
+                    } else if (itemsMap.has(id)) {
+                        itemsMap.delete(id);
                     }
+                });
+
+                const items = Array.from(itemsMap.values());
+                items.forEach(item => {
+                    total += Number(item.price || 0);
                 });
 
                 const count = items.length;

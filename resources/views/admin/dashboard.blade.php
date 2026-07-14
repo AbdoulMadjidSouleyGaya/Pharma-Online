@@ -461,7 +461,7 @@
             <span>Gérer les utilisateurs</span>
           </a>
           <a href="{{ route('admin.pharmacies.index') }}" class="btn">
-            <span>Gérer les pharmacies (admin)</span>
+            <span>Gérer les pharmacies partenairees </span>
           </a>
           <a href="{{ route('admin.guards.index') }}" class="btn">
             <span>Pharmacies de garde</span>
@@ -473,7 +473,7 @@
 
         <div class="sep"></div>
         <div class="muted">
-          Tu peux enrichir cette zone plus tard avec d’autres liens (statistiques détaillées, logs, etc.).
+          ZONE DE STATISTIQUES DETAILLEES ET LOGS
         </div>
       </div>
 

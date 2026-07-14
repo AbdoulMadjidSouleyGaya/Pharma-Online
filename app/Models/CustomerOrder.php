@@ -29,22 +29,36 @@ class CustomerOrder extends Model
     public const FILTER_REJECTED   = 'rejected';
     public const FILTER_CANCELLED  = 'cancelled';
 
+    /**
+     * Volontairement restreint : total/status/pharmacy_id/cashier_no ne sont
+     * jamais assignés en masse (voir OrderController et PharmacistOrderController,
+     * qui les affectent explicitement propriété par propriété) pour empêcher
+     * qu'un futur ::create($request->all()) laisse un client forcer son propre
+     * prix, statut ou pharmacie.
+     */
     protected $fillable = [
         'id',
         'user_id',
         'number',
         'count',
-        'total',
-        'status',
         'items',
-        'pharmacy_id',
         'decision_comment',
-        'cashier_no',
+        'prescription_path',
+        'prescription_original_name',
     ];
 
     protected $casts = [
         'items'      => 'array',
         'cashier_no' => 'integer',
+    ];
+
+    public function getHasPrescriptionAttribute(): bool
+    {
+        return ! empty($this->prescription_path);
+    }
+
+    protected $appends = [
+        'has_prescription',
     ];
 
     public function pharmacy(): BelongsTo

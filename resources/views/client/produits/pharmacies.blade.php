@@ -25,6 +25,8 @@
 
   $rxOriginal   = session('prescription_original');
   $rxUploadedAt = session('prescription_uploaded_at');
+  $userGeo      = $userGeo ?? session('customer_geo');
+  $hasUserGeo   = is_array($userGeo) && isset($userGeo['lat'], $userGeo['lng']);
 @endphp
 
 <style>
@@ -93,6 +95,11 @@
               Ordonnance :
               <span class="font-extrabold">{{ $hasPrescription ? 'OK' : 'Aucune' }}</span>
             </span>
+
+            <span id="geoStatusBadge" class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-extrabold border {{ $hasUserGeo ? 'bg-sky-50 text-sky-700 border-sky-100' : 'bg-amber-50 text-amber-700 border-amber-100' }}">
+              Position :
+              <span class="font-extrabold">{{ $hasUserGeo ? 'active' : 'non activée' }}</span>
+            </span>
           </div>
         </div>
 
@@ -138,11 +145,16 @@
       <div>
         <h2 class="text-base font-extrabold text-slate-900">Recherche & affichage</h2>
         <p class="text-xs text-slate-500 mt-1">
-          Filtrez par nom/quartier/adresse.
+          Filtrez par nom/quartier/adresse et utilisez votre position actuelle pour afficher la distance jusqu’à chaque pharmacie.
         </p>
       </div>
 
       <div class="flex items-center gap-2 flex-wrap">
+        <button type="button" id="geoLocateBtn"
+          class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-extrabold border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 transition">
+          Utiliser ma position
+        </button>
+
         @if(!empty($q))
           <span class="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1 text-xs font-bold text-slate-700 border border-slate-200">
             Résultats pour :
@@ -156,7 +168,7 @@
       </div>
     </div>
 
-    <form action="{{ route('produits.commande.pharmacies') }}" method="get" class="space-y-3">
+    <form action="{{ route('produits.commande.pharmacies') }}" method="get" class="space-y-3 js-geo-form">
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-3">
         {{-- search --}}
         <div class="lg:col-span-8">
@@ -177,6 +189,8 @@
               class="w-full border-none bg-transparent focus:ring-0 text-sm placeholder:text-slate-400"
               placeholder="Ex : Pharmacie A, Yantala…"
               autocomplete="off">
+            <input type="hidden" name="user_latitude" class="js-user-lat" value="{{ $hasUserGeo ? $userGeo['lat'] : '' }}">
+            <input type="hidden" name="user_longitude" class="js-user-lng" value="{{ $hasUserGeo ? $userGeo['lng'] : '' }}">
           </div>
         </div>
 
@@ -234,9 +248,11 @@
 
         <div class="flex items-center gap-2 flex-wrap">
           {{-- Upload --}}
-          <form id="rxUploadForm" action="{{ route('produits.commande.ordonnance.upload') }}" method="post" enctype="multipart/form-data">
+          <form id="rxUploadForm" action="{{ route('produits.commande.ordonnance.upload') }}" method="post" enctype="multipart/form-data" class="js-geo-form">
             @csrf
             <input type="hidden" name="q" value="{{ $q }}">
+            <input type="hidden" name="user_latitude" class="js-user-lat" value="{{ $hasUserGeo ? $userGeo['lat'] : '' }}">
+            <input type="hidden" name="user_longitude" class="js-user-lng" value="{{ $hasUserGeo ? $userGeo['lng'] : '' }}">
             <input id="rxFile" type="file" name="prescription" class="hidden" accept="application/pdf,image/*">
 
             <button type="button"
@@ -263,9 +279,11 @@
           @endif
 
           {{-- Search via ordonnance --}}
-          <form action="{{ route('produits.commande.ordonnance.search') }}" method="post">
+          <form action="{{ route('produits.commande.ordonnance.search') }}" method="post" class="js-geo-form">
             @csrf
             <input type="hidden" name="q" value="{{ $q }}">
+            <input type="hidden" name="user_latitude" class="js-user-lat" value="{{ $hasUserGeo ? $userGeo['lat'] : '' }}">
+            <input type="hidden" name="user_longitude" class="js-user-lng" value="{{ $hasUserGeo ? $userGeo['lng'] : '' }}">
 
             <button type="submit"
               @if(!$hasPrescription) disabled @endif
@@ -285,6 +303,60 @@
           const input = document.getElementById('rxFile');
           const form  = document.getElementById('rxUploadForm');
           const btn   = document.getElementById('rxUploadBtn');
+          const locateBtn = document.getElementById('geoLocateBtn');
+          const statusBadge = document.getElementById('geoStatusBadge');
+          const latInputs = Array.from(document.querySelectorAll('.js-user-lat'));
+          const lngInputs = Array.from(document.querySelectorAll('.js-user-lng'));
+
+          const applyCoords = (lat, lng) => {
+            latInputs.forEach(el => el.value = lat);
+            lngInputs.forEach(el => el.value = lng);
+
+            if (statusBadge) {
+              statusBadge.className = 'inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-extrabold border bg-sky-50 text-sky-700 border-sky-100';
+              statusBadge.innerHTML = 'Position : <span class="font-extrabold">active</span>';
+            }
+
+            if (locateBtn) {
+              locateBtn.textContent = 'Position récupérée';
+            }
+          };
+
+          const requestCoords = (callback) => {
+            if (!navigator.geolocation) {
+              if (statusBadge) {
+                statusBadge.className = 'inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-extrabold border bg-red-50 text-red-700 border-red-100';
+                statusBadge.innerHTML = 'Position : <span class="font-extrabold">non supportée</span>';
+              }
+              return;
+            }
+
+            if (locateBtn) {
+              locateBtn.disabled = true;
+              locateBtn.textContent = 'Localisation…';
+            }
+
+            navigator.geolocation.getCurrentPosition(
+              (position) => {
+                const lat = position.coords.latitude.toFixed(7);
+                const lng = position.coords.longitude.toFixed(7);
+                applyCoords(lat, lng);
+                if (typeof callback === 'function') callback();
+                if (locateBtn) locateBtn.disabled = false;
+              },
+              () => {
+                if (statusBadge) {
+                  statusBadge.className = 'inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-extrabold border bg-red-50 text-red-700 border-red-100';
+                  statusBadge.innerHTML = 'Position : <span class="font-extrabold">refusée</span>';
+                }
+                if (locateBtn) {
+                  locateBtn.disabled = false;
+                  locateBtn.textContent = 'Utiliser ma position';
+                }
+              },
+              { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+            );
+          };
 
           if(!input || !form || !btn) return;
 
@@ -298,6 +370,12 @@
               form.submit();
             }
           });
+
+          if (locateBtn) {
+            locateBtn.addEventListener('click', function(){
+              requestCoords();
+            });
+          }
         })();
       </script>
     </div>
@@ -332,6 +410,7 @@
                 <th class="px-4 py-3 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">Quartier</th>
                 <th class="px-4 py-3 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">Adresse</th>
                 <th class="px-4 py-3 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">Contact</th>
+                <th class="px-4 py-3 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">Distance</th>
                 <th class="px-4 py-3 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">Correspondance</th>
                 <th class="px-4 py-3 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider">Actions</th>
               </tr>
@@ -355,6 +434,15 @@
                   <td class="px-4 py-3 text-sm text-slate-700">{{ $pharmacy->district ?? '—' }}</td>
                   <td class="px-4 py-3 text-sm text-slate-700"><span class="line-clamp-2">{{ $pharmacy->address ?? '—' }}</span></td>
                   <td class="px-4 py-3 text-sm font-bold text-slate-700">{{ $pharmacy->phone ?? '—' }}</td>
+                  <td class="px-4 py-3 text-sm text-slate-700">
+                    @if(!empty($pharmacy->distance_available) && !empty($pharmacy->distance_label))
+                      <span class="inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-1 text-[11px] font-extrabold text-sky-700 border border-sky-100">
+                        {{ $pharmacy->distance_label }}
+                      </span>
+                    @else
+                      <span class="text-xs text-slate-400">{{ $hasUserGeo ? 'GPS pharmacie indisponible' : 'Activez votre position' }}</span>
+                    @endif
+                  </td>
 
                   <td class="px-4 py-3">
                     @if($tt > 0)
@@ -372,7 +460,7 @@
 
                   <td class="px-4 py-3">
                     <div class="flex items-center gap-2">
-                      <a href="{{ route('produits.commande.pharmacy', $pharmacy) }}"
+                      <a href="{{ route('produits.commande.pharmacy', ['pharmacy' => $pharmacy, 'from_rx' => $tt > 0 ? 1 : null]) }}"
                          class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-2xl
                                 bg-emerald-600 text-white text-xs font-extrabold hover:bg-emerald-500 transition shadow-sm hover:shadow">
                         Voir les produits →
@@ -446,6 +534,12 @@
                         </span>
                       @endif
 
+                      @if(!empty($pharmacy->distance_available) && !empty($pharmacy->distance_label))
+                        <span class="inline-flex items-center rounded-full bg-sky-50 text-sky-700 text-[10px] px-2 py-0.5 border border-sky-100 font-extrabold">
+                          {{ $pharmacy->distance_label }}
+                        </span>
+                      @endif
+
                       @if($tt > 0)
                         <span class="inline-flex items-center rounded-full text-[10px] px-2 py-0.5 border font-extrabold
                           {{ $isPerfect ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-50 text-slate-700 border-slate-200' }}">
@@ -488,10 +582,21 @@
                     <span class="text-slate-400">📞</span>
                     <span class="font-bold text-slate-700">{{ $pharmacy->phone ?? 'Contact non renseigné' }}</span>
                   </div>
+
+                  <div class="flex items-center gap-2">
+                    <span class="text-slate-400">📏</span>
+                    <span class="font-bold text-slate-700">
+                      @if(!empty($pharmacy->distance_available) && !empty($pharmacy->distance_label))
+                        {{ $pharmacy->distance_label }} depuis votre position
+                      @else
+                        {{ $hasUserGeo ? 'Distance indisponible (GPS pharmacie manquant)' : 'Activez votre position pour voir la distance' }}
+                      @endif
+                    </span>
+                  </div>
                 </div>
 
                 <div class="pt-1 flex items-center gap-2">
-                  <a href="{{ route('produits.commande.pharmacy', $pharmacy) }}"
+                  <a href="{{ route('produits.commande.pharmacy', ['pharmacy' => $pharmacy, 'from_rx' => $tt > 0 ? 1 : null]) }}"
                      class="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl
                             bg-emerald-600 text-white text-xs font-extrabold hover:bg-emerald-500 transition shadow-sm hover:shadow">
                     Voir les produits

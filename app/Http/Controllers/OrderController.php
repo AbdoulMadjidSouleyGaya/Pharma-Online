@@ -71,6 +71,8 @@ class OrderController extends Controller
                     'decision_comment' => $row->decision_comment,
                     'cashier_no'       => $row->cashier_no,
                     'pharmacy_name'    => optional($row->pharmacy)->name,
+                    'prescription_path' => $row->prescription_path,
+                    'prescription_original_name' => $row->prescription_original_name,
                 ];
 
                 // Fusion (la DB écrase la session si conflit)
@@ -105,19 +107,33 @@ class OrderController extends Controller
             'items'           => ['required', 'array', 'min:1'],
             'items.*.id'      => ['required', 'exists:pharma_products,id'],
             'items.*.qty'     => ['required', 'integer', 'min:1'],
-            'items.*.price'   => ['nullable', 'numeric', 'min:0'],
         ]);
 
         $pharmacy = Pharmacy::findOrFail($data['pharmacy_id']);
 
-        // Normalisation des items + calcul du total
+        // Le prix n'est jamais accepté depuis le client : on le recalcule
+        // depuis la base, pour les produits de la pharmacie sélectionnée.
+        $productIds = array_map(fn ($item) => (int) $item['id'], $data['items']);
+
+        $products = PharmaProduct::where('pharmacy_id', $pharmacy->id)
+            ->whereIn('id', $productIds)
+            ->get(['id', 'prix'])
+            ->keyBy('id');
+
         $normalizedItems = [];
         $total = 0;
 
         foreach ($data['items'] as $rawItem) {
-            $id    = (int) $rawItem['id'];
-            $qty   = (int) ($rawItem['qty'] ?? 1);
-            $price = (int) ($rawItem['price'] ?? 0);
+            $id  = (int) $rawItem['id'];
+            $qty = (int) ($rawItem['qty'] ?? 1);
+
+            $product = $products->get($id);
+            if (!$product) {
+                // Produit inexistant pour cette pharmacie : on l'ignore.
+                continue;
+            }
+
+            $price = is_numeric($product->prix) ? (int) $product->prix : 0;
 
             $normalizedItems[] = [
                 'id'    => $id,
@@ -128,6 +144,13 @@ class OrderController extends Controller
             $total += $price * $qty;
         }
 
+        if (empty($normalizedItems)) {
+            return back()->with('error', "Aucun produit valide n'a été sélectionné pour cette pharmacie.");
+        }
+
+        $prescriptionPath = $request->session()->get('prescription_path');
+        $prescriptionOriginalName = $request->session()->get('prescription_original');
+
         // Création de la commande
         $order = new CustomerOrder();
         $order->id          = (string) Str::uuid();
@@ -137,6 +160,8 @@ class OrderController extends Controller
         $order->total       = $total;
         $order->count       = count($normalizedItems);
         $order->items       = $normalizedItems;
+        $order->prescription_path = $prescriptionPath;
+        $order->prescription_original_name = $prescriptionOriginalName;
 
         // Génération d’un numéro lisible, séquentiel par pharmacie
         $order->number = (int) CustomerOrder::where('pharmacy_id', $pharmacy->id)->max('number') + 1;
@@ -205,6 +230,8 @@ class OrderController extends Controller
                 'decision_comment' => $row->decision_comment,
                 'cashier_no'       => $row->cashier_no,
                 'pharmacy_name'    => optional($row->pharmacy)->name,
+                'prescription_path' => $row->prescription_path,
+                'prescription_original_name' => $row->prescription_original_name,
             ];
 
             // Hydrate la session pour les prochains accès

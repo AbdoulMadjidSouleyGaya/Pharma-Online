@@ -1,10 +1,14 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connexion - PharmaOnline</title>
     <style>
+        * {
+            box-sizing: border-box;
+        }
+
         body {
             margin: 0;
             padding: 0;
@@ -55,7 +59,8 @@
         }
 
         input[type="email"],
-        input[type="password"] {
+        input[type="password"],
+        input[type="text"] {
             width: 100%;
             padding: 15px;
             font-size: 16px;
@@ -66,10 +71,43 @@
         }
 
         input[type="email"]:focus,
-        input[type="password"]:focus {
+        input[type="password"]:focus,
+        input[type="text"]:focus {
             border-color: #007bff;
             outline: none;
             box-shadow: 0 0 8px rgba(0, 123, 255, 0.5);
+        }
+
+        .password-wrapper {
+            position: relative;
+        }
+
+        .password-wrapper input {
+            padding-right: 110px;
+        }
+
+        .toggle-password {
+            position: absolute;
+            top: 50%;
+            right: 12px;
+            transform: translateY(-50%);
+            border: none;
+            background: transparent;
+            color: #007bff;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: 8px;
+        }
+
+        .toggle-password:hover {
+            background: rgba(0, 123, 255, 0.12);
+        }
+
+        .toggle-password:focus {
+            outline: 2px solid rgba(0, 123, 255, 0.4);
+            outline-offset: 2px;
         }
 
         .submit-button {
@@ -107,11 +145,11 @@
         .nav-menu {
             position: absolute;
             top: 20px;
-            right: 20px; /* Aligning to the right */
+            right: 20px;
             display: flex;
             gap: 20px;
             z-index: 10;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); /* Adding shadow */
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
         }
 
         .nav-menu a {
@@ -129,20 +167,30 @@
             transform: scale(1.1);
         }
 
-        /* Responsive adjustments */
         @media (max-width: 480px) {
             .form-container {
                 padding: 30px;
+                max-width: calc(100% - 24px);
             }
 
             .nav-menu {
                 top: 10px;
                 right: 10px;
+                gap: 10px;
             }
 
             .nav-menu a {
                 font-size: 16px;
                 padding: 8px 12px;
+            }
+
+            .password-wrapper input {
+                padding-right: 95px;
+            }
+
+            .toggle-password {
+                font-size: 12px;
+                right: 10px;
             }
         }
     </style>
@@ -152,21 +200,49 @@
         <a href="{{ url('/') }}">Accueil</a>
         <a href="{{ url('/contact') }}">Contact</a>
     </div>
+
     <div class="form-container">
         <h2>Connexion</h2>
+
         <form action="{{ url('/login') }}" method="POST">
             @csrf
+
             <div class="form-group">
                 <label for="email">Email</label>
-                <input type="email" id="email" name="email" required>
+                <input type="email" id="email" name="email" value="{{ old('email') }}" required>
             </div>
+
             <div class="form-group">
                 <label for="password">Mot de passe</label>
-                <input type="password" id="password" name="password" required>
+                <div class="password-wrapper">
+                    <input type="password" id="password" name="password" required>
+                    <button type="button" class="toggle-password" id="togglePassword" aria-label="Afficher le mot de passe">
+                        Afficher
+                    </button>
+                </div>
             </div>
+
             <button type="submit" class="submit-button">Se connecter</button>
             <a href="{{ url('/password/reset') }}" class="forgot-password">Mot de passe oublié ?</a>
         </form>
     </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const passwordInput = document.getElementById('password');
+            const toggleButton = document.getElementById('togglePassword');
+
+            if (!passwordInput || !toggleButton) {
+                return;
+            }
+
+            toggleButton.addEventListener('click', function () {
+                const isHidden = passwordInput.type === 'password';
+                passwordInput.type = isHidden ? 'text' : 'password';
+                toggleButton.textContent = isHidden ? 'Masquer' : 'Afficher';
+                toggleButton.setAttribute('aria-label', isHidden ? 'Masquer le mot de passe' : 'Afficher le mot de passe');
+            });
+        });
+    </script>
 </body>
 </html>

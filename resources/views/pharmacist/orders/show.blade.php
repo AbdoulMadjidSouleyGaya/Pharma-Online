@@ -110,6 +110,13 @@
   $createdTxt  = $createdAt
     ? (is_string($createdAt) ? \Carbon\Carbon::parse($createdAt)->format('d/m/Y H:i') : optional($createdAt)->format('d/m/Y H:i'))
     : '—';
+
+  $prescriptionPath = $order->prescription_path ?? null;
+  $prescriptionOriginalName = $order->prescription_original_name ?? null;
+  $prescriptionExtension = $prescriptionPath ? strtolower(pathinfo($prescriptionPath, PATHINFO_EXTENSION)) : null;
+  $prescriptionIsPdf = $prescriptionExtension === 'pdf';
+  $prescriptionIsImage = in_array($prescriptionExtension, ['jpg', 'jpeg', 'png', 'webp', 'gif']);
+  $prescriptionUrl = $prescriptionPath ? route('pharmacist.orders.prescription', $order) : null;
 @endphp
 
   <main class="wrap">
@@ -207,6 +214,42 @@
               </tr>
             </tfoot>
           </table>
+
+          @if($prescriptionUrl)
+            <div class="hr"></div>
+            <div>
+              <h2>Ordonnance téléversée</h2>
+              <p class="muted" style="margin-top:-2px">
+                {{ $prescriptionOriginalName ?: basename($prescriptionPath) }}
+              </p>
+
+              @if($prescriptionIsPdf)
+                <div style="margin-top:12px; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#081225">
+                  <iframe
+                    src="{{ $prescriptionUrl }}"
+                    title="Ordonnance du client"
+                    style="width:100%; height:560px; border:0; display:block; background:#fff;"
+                  ></iframe>
+                </div>
+              @elseif($prescriptionIsImage)
+                <div style="margin-top:12px; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#081225; padding:12px; text-align:center;">
+                  <img
+                    src="{{ $prescriptionUrl }}"
+                    alt="Ordonnance du client"
+                    style="max-width:100%; height:auto; border-radius:10px; display:inline-block; background:#fff;"
+                  >
+                </div>
+              @else
+                <div class="alert" style="margin-top:12px">
+                  Le format de ce fichier ne peut pas être prévisualisé directement.
+                </div>
+              @endif
+
+              <div style="margin-top:12px">
+                <a href="{{ $prescriptionUrl }}" target="_blank" rel="noopener" class="btn outline">📎 Ouvrir l’ordonnance</a>
+              </div>
+            </div>
+          @endif
 
           @if(!empty($order->decision_comment))
             <div class="hr"></div>

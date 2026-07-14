@@ -360,19 +360,19 @@
 
         <div class="top-actions">
             <a class="btn" href="{{ url('/pharmacist/manage') }}">
-                <span>⬅️</span> Centre de gestion
+                Centre de gestion
             </a>
             <a class="btn" href="{{ route('pharmacist.dashboard') }}">
-                <span>📊</span> Tableau de bord
+               Tableau de bord
             </a>
             <a class="btn" href="{{ route('pharmacist.suppliers.index') }}">
-                <span>📇</span> Fournisseurs
+                Fournisseurs
             </a>
             <a class="btn" href="{{ route('pharmacist.stock.export') }}">
-                <span>📤</span> Exporter Excel
+               Exporter Excel
             </a>
             <button type="button" class="btn btn-primary" onclick="window.print()">
-                <span>🖨️</span> Imprimer
+                Imprimer
             </button>
         </div>
     </div>

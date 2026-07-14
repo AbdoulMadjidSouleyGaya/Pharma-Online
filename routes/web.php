@@ -213,12 +213,8 @@ Route::prefix('admin')->name('admin.')->group(function () {
             // Voir un groupe (1..5)
             Route::get('/guards/{group}', [AdminGuardController::class, 'show'])->name('guards.show');
 
-            // Import Excel/CSV d’un groupe
+            // Import Excel/CSV d’un groupe (tout type de fichier accepté)
             Route::post('/guards/{group}/import', [AdminGuardController::class, 'import'])->name('guards.import');
-
-
-            // Import “tout type”
-            Route::post('/guards/{schedule}/import',  [AdminGuardController::class, 'import'])->name('guards.import');
 
             // CRUD pharmacies de garde
             Route::post('/guards/{schedule}/pharmacies',                [AdminGuardPharmacyController::class, 'store'])->name('guards.pharmacies.store');
@@ -303,15 +299,19 @@ Route::prefix('pharmacist')
             Route::get('/orders', [PharmacistOrderController::class, 'index'])
                 ->name('orders.index');
 
+            // Nombre de commandes en attente (JSON) pour le dashboard + alerte sonore
+            // Important : cette route doit rester avant /orders/{order}.
+            Route::get('/orders/pending-count', [PharmacistOrderController::class, 'pendingCount'])
+                ->name('orders.pendingCount');
+
+            Route::get('/orders/{order}/prescription', [PharmacistOrderController::class, 'prescription'])
+                ->name('orders.prescription');
+
             Route::get('/orders/{order}', [PharmacistOrderController::class, 'show'])
                 ->name('orders.show');
 
             Route::post('/orders/{order}/status', [PharmacistOrderController::class, 'updateStatus'])
                 ->name('orders.updateStatus');
-
-            // Nombre de commandes en attente (JSON) pour le dashboard + alerte sonore
-            Route::get('/orders/pending-count', [PharmacistOrderController::class, 'pendingCount'])
-                ->name('orders.pendingCount');
 
         
 
@@ -373,8 +373,6 @@ Route::prefix('pharmacist')
             // Export CSV/Excel du stock
             Route::get('/stock/export', [StockController::class, 'export'])
                 ->name('stock.export');
-            
-            Route::post('/stock/contact', [StockController::class, 'contactSupplier'])->name('stock.contact');
 
 
             /*
@@ -412,5 +410,5 @@ Route::prefix('pharmacist')
 */
 Route::get('/pharmacies-de-garde', [GuardPublicController::class, 'index'])->name('guards.public');
 Route::get('/pharmacies-de-garde/p/{offset}', [GuardPublicController::class, 'page'])
-    ->whereNumber('offset')
+    ->where('offset', '-?[0-9]+')
     ->name('guards.public.page');

@@ -7,8 +7,7 @@ use App\Models\CustomerOrder;
 use App\Models\Pharmacy;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class PharmacistReportController extends Controller
 {
@@ -32,74 +31,110 @@ class PharmacistReportController extends Controller
         $pharmacy = $this->currentPharmacy();
         abort_unless($pharmacy, 403, "Aucune pharmacie rattachée.");
 
-        // Filtre période
-        $to   = $request->filled('to')   ? Carbon::parse($request->get('to'))->endOfDay()   : now()->endOfDay();
-        $from = $request->filled('from') ? Carbon::parse($request->get('from'))->startOfDay() : now()->subDays(29)->startOfDay();
+        // period = 7, 30, 90 ou "all"
+        $period = $request->query('period', '30');
+        $days   = is_numeric($period) ? (int) $period : null;
 
-        // Base
-        $base = CustomerOrder::where('pharmacy_id', $pharmacy->id)
-            ->whereBetween('created_at', [$from, $to]);
+        $baseQuery = CustomerOrder::where('pharmacy_id', $pharmacy->id);
 
-        // Agrégats
-        $validatedQ = (clone $base)->where('status', 'valide');
-        $rejectedQ  = (clone $base)->where('status', 'rejete');
-
-        $validatedCount = (clone $validatedQ)->count();
-        $rejectedCount  = (clone $rejectedQ)->count();
-
-        $validatedTotal = (clone $validatedQ)->sum('total');
-        $avgBasket      = $validatedCount > 0 ? round($validatedTotal / $validatedCount) : 0;
-
-        // Par jour (labels + 2 séries)
-        $perDay = (clone $base)
-            ->select([
-                DB::raw("DATE(created_at) as d"),
-                DB::raw("SUM(CASE WHEN status='valide' THEN 1 ELSE 0 END) as v_count"),
-                DB::raw("SUM(CASE WHEN status='rejete' THEN 1 ELSE 0 END) as r_count"),
-                DB::raw("SUM(CASE WHEN status='valide' THEN total ELSE 0 END) as v_total"),
-            ])
-            ->groupBy('d')
-            ->orderBy('d','asc')
-            ->get();
-
-        // Normaliser la plage (assurer 0 les jours manquants)
-        $cursor = $from->copy();
-        $labels = [];
-        $seriesValidated = [];
-        $seriesRejected  = [];
-        $seriesValTotal  = [];
-
-        $map = $perDay->keyBy('d');
-        while ($cursor->lte($to)) {
-            $key = $cursor->toDateString();
-            $row = $map->get($key);
-            $labels[]         = $cursor->format('d/m');
-            $seriesValidated[] = $row ? (int)$row->v_count : 0;
-            $seriesRejected[]  = $row ? (int)$row->r_count : 0;
-            $seriesValTotal[]  = $row ? (int)$row->v_total : 0;
-            $cursor->addDay();
+        // 🔹 Si "all" → pas de filtre date
+        // 🔹 Sinon filtre sur les N derniers jours
+        if (!is_null($days) && $days > 0) {
+            $from = now()->subDays($days);
+            $baseQuery->whereDate('created_at', '>=', $from->toDateString());
         }
 
-        // Dernières 15 commandes (tous statuts) pour contexte
-        $latest = CustomerOrder::with('user')
-            ->where('pharmacy_id', $pharmacy->id)
-            ->orderBy('created_at','desc')
-            ->limit(15)
-            ->get();
+        // ============================
+        // Normalisation des statuts
+        // ============================
+        $statusPending   = ['en_attente', 'en_cours', 'pending'];
+        $statusValidated = ['valide', 'validated'];
+        $statusRejected  = ['rejete', 'rejected', 'annulee', 'cancelled'];
+
+        // ======================
+        // STATISTIQUES GLOBALES
+        // ======================
+        $totalOrders = (clone $baseQuery)->count();
+        $validated   = (clone $baseQuery)->whereIn('status', $statusValidated)->count();
+        $rejected    = (clone $baseQuery)->whereIn('status', $statusRejected)->count();
+        $pending     = (clone $baseQuery)->whereIn('status', $statusPending)->count();
+
+        // Montant total (si tu veux seulement validées, remplace par whereIn(statusValidated))
+       $totalAmount = (clone $baseQuery)
+    ->whereIn('status', array_merge($statusValidated, $statusPending))
+    ->sum('total');
+
+         $avgAmount   = $totalOrders > 0 ? $totalAmount / $totalOrders : 0;
+
+        $effectivePeriod = $days ?? 'all';
+
+        $stats = [
+            'period'       => (string) $effectivePeriod,
+            'period_label' => $effectivePeriod === 'all'
+                ? "toute l’historique"
+                : "les {$effectivePeriod} derniers jours",
+            'total_orders' => (int) $totalOrders,
+            'validated'    => (int) $validated,
+            'rejected'     => (int) $rejected,
+            'pending'      => (int) $pending,
+            'total_amount' => (int) $totalAmount,
+            'avg_amount'   => (float) $avgAmount,
+        ];
+
+        Log::info('📊 Pharmacist reports', [
+            'pharmacy_id'  => $pharmacy->id,
+            'period'       => $stats['period'],
+            'total_orders' => $stats['total_orders'],
+        ]);
+
+        // ======================
+        // TOP PRODUITS (items JSON)
+        // ======================
+        $topProductsArray = [];
+
+        (clone $baseQuery)
+            ->whereNotNull('items')
+            ->orderBy('created_at', 'desc')
+            ->chunk(100, function ($orders) use (&$topProductsArray) {
+                foreach ($orders as $order) {
+                    $items = (array) ($order->items ?? []);
+
+                    foreach ($items as $line) {
+                        if (!is_array($line)) continue;
+
+                        $id    = $line['id'] ?? $line['product_id'] ?? null;
+                        $qty   = (int)($line['qty'] ?? $line['quantity'] ?? 1);
+                        $price = (int)($line['price'] ?? 0);
+
+                        if (!$id) continue;
+
+                        $key = (string) $id;
+
+                        if (!isset($topProductsArray[$key])) {
+                            $topProductsArray[$key] = [
+                                'id'      => $id,
+                                'libelle' => $line['name'] ?? $line['libelle'] ?? ('Produit #'.$id),
+                                'qty'     => 0,
+                                'amount'  => 0,
+                            ];
+                        }
+
+                        $topProductsArray[$key]['qty']    += $qty;
+                        $topProductsArray[$key]['amount'] += $price * $qty;
+                    }
+                }
+            });
+
+        $topProducts = collect($topProductsArray)
+            ->sortByDesc('qty')
+            ->take(10)
+            ->values()
+            ->all();
 
         return view('pharmacist.reports', [
-            'pharmacy'         => $pharmacy,
-            'from'             => $from,
-            'to'               => $to,
-            'validatedCount'   => $validatedCount,
-            'rejectedCount'    => $rejectedCount,
-            'validatedTotal'   => (int) $validatedTotal,
-            'avgBasket'        => (int) $avgBasket,
-            'labels'           => $labels,
-            'seriesValidated'  => $seriesValidated,
-            'seriesRejected'   => $seriesRejected,
-            'seriesValTotal'   => $seriesValTotal,
-            'latest'           => $latest,
+            'pharmacy'    => $pharmacy,
+            'stats'       => $stats,
+            'topProducts' => $topProducts,
         ]);
     }
 }

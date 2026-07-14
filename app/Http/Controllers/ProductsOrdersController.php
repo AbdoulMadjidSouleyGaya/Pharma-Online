@@ -14,12 +14,19 @@ use Symfony\Component\Process\Process;
 class ProductsOrdersController extends Controller
 {
     /**
-     * ✅ OPTIONNEL : si pdftoppm n'est pas dans le PATH, mets le chemin complet ici.
-     * Exemple:
-     * private const PDFTOPPM_BIN = 'C:\ProgramData\chocolatey\lib\poppler\tools\poppler-25.12.0\Library\bin\pdftoppm.exe';
+     * Chemins des binaires OCR, configurables via .env (TESSERACT_BIN / PDFTOPPM_BIN)
+     * pour rester portable entre un poste Windows de dev et un serveur Linux
+     * de production (voir config/pharma.php).
      */
-    private const PDFTOPPM_BIN = 'C:\\ProgramData\\chocolatey\\lib\\poppler\\tools\\poppler-25.12.0\\Library\\bin\\pdftoppm.exe';
-    private const TESSERACT_BIN = 'tesseract';
+    private function pdftoppmBin(): string
+    {
+        return (string) config('pharma.pdftoppm_bin', 'pdftoppm');
+    }
+
+    private function tesseractBin(): string
+    {
+        return (string) config('pharma.tesseract_bin', 'tesseract');
+    }
 
     /**
      * Liste des produits que le client peut commander.
@@ -49,13 +56,16 @@ class ProductsOrdersController extends Controller
     public function selectPharmacy(Request $request)
     {
         $q = $request->query('q');
+        $userGeo = $this->resolveCustomerCoordinates($request);
 
         if (empty($q)) {
             $pharmacies = Pharmacy::orderBy('name')->get();
+            $this->attachDistanceMetadata($pharmacies, $userGeo);
 
             return view('client.produits.pharmacies', [
                 'pharmacies' => $pharmacies,
                 'q'          => $q,
+                'userGeo'    => $userGeo,
             ]);
         }
 
@@ -81,9 +91,12 @@ class ProductsOrdersController extends Controller
             ->orderBy('name')
             ->get();
 
+        $this->attachDistanceMetadata($pharmacies, $userGeo);
+
         return view('client.produits.pharmacies', [
             'pharmacies' => $pharmacies,
             'q'          => $q,
+            'userGeo'    => $userGeo,
         ]);
     }
 
@@ -93,6 +106,9 @@ class ProductsOrdersController extends Controller
     public function pharmacyProducts(Request $request, Pharmacy $pharmacy)
     {
         $q = $request->query('q');
+        $fromRx = $request->boolean('from_rx');
+        $rxTerms = $fromRx ? $request->session()->get('rx_terms', []) : [];
+        $rxTerms = is_array($rxTerms) ? array_values(array_filter($rxTerms, fn ($term) => is_string($term) && trim($term) !== '')) : [];
 
         $products = PharmaProduct::query()
             ->where('pharmacy_id', $pharmacy->id)
@@ -104,10 +120,46 @@ class ProductsOrdersController extends Controller
             ->paginate(12)
             ->withQueryString();
 
+        $autoSelectedProductIds = [];
+        $autoSelectedOrderItems = [];
+
+        if ($fromRx && !empty($rxTerms)) {
+            $matchingProducts = PharmaProduct::query()
+                ->where('pharmacy_id', $pharmacy->id)
+                ->where('stock', 'Disponible')
+                ->orderBy('libelle')
+                ->get(['id', 'libelle', 'prix']);
+
+            foreach ($matchingProducts as $product) {
+                if (! $this->productMatchesPrescriptionTerms((string) $product->libelle, $rxTerms)) {
+                    continue;
+                }
+
+                $autoSelectedProductIds[] = (int) $product->id;
+                $autoSelectedOrderItems[] = [
+                    'id' => (int) $product->id,
+                    'price' => is_null($product->prix) ? 0 : (float) $product->prix,
+                ];
+            }
+
+            $autoSelectedProductIds = array_values(array_unique($autoSelectedProductIds));
+            $autoSelectedOrderItems = array_values(collect($autoSelectedOrderItems)
+                ->unique('id')
+                ->map(fn ($item) => [
+                    'id' => (int) $item['id'],
+                    'price' => (float) $item['price'],
+                ])
+                ->all());
+        }
+
         return view('client.produits.pharmacy-products', [
             'pharmacy' => $pharmacy,
             'products' => $products,
             'q'        => $q,
+            'fromRx'   => $fromRx,
+            'rxTerms'  => $rxTerms,
+            'autoSelectedProductIds' => $autoSelectedProductIds,
+            'autoSelectedOrderItems' => $autoSelectedOrderItems,
         ]);
     }
 
@@ -129,13 +181,13 @@ class ProductsOrdersController extends Controller
 
         // Supprimer ancienne ordonnance
         $oldPath = $request->session()->get('prescription_path');
-        if ($oldPath && Storage::disk('public')->exists($oldPath)) {
-            Storage::disk('public')->delete($oldPath);
+        if ($oldPath && Storage::disk('local')->exists($oldPath)) {
+            Storage::disk('local')->delete($oldPath);
         }
 
-        // Sauvegarder nouvelle ordonnance
+        // Sauvegarder nouvelle ordonnance (disque privé, jamais accessible via /storage)
         $filename = 'ordonnance_user_'.$userId.'_'.now()->format('Ymd_His').'_'.uniqid().'.'.$file->getClientOriginalExtension();
-        $path = $file->storeAs('prescriptions', $filename, 'public');
+        $path = $file->storeAs('prescriptions', $filename, 'local');
 
         // Session meta
         $request->session()->put('prescription_path', $path);
@@ -155,8 +207,8 @@ class ProductsOrdersController extends Controller
     public function clearPrescription(Request $request)
     {
         $oldPath = $request->session()->get('prescription_path');
-        if ($oldPath && Storage::disk('public')->exists($oldPath)) {
-            Storage::disk('public')->delete($oldPath);
+        if ($oldPath && Storage::disk('local')->exists($oldPath)) {
+            Storage::disk('local')->delete($oldPath);
         }
 
         $request->session()->forget([
@@ -176,14 +228,15 @@ class ProductsOrdersController extends Controller
      */
     public function searchPharmacyByPrescription(Request $request)
     {
+        $userGeo = $this->resolveCustomerCoordinates($request);
         $path = $request->session()->get('prescription_path');
 
-        if (!$path || !Storage::disk('public')->exists($path)) {
+        if (!$path || !Storage::disk('local')->exists($path)) {
             return redirect()->route('produits.commande.pharmacies', $request->only('q'))
                 ->with('error', "⚠️ Aucune ordonnance valide n'a été trouvée. Téléverse d'abord ton ordonnance.");
         }
 
-        $absolutePath = Storage::disk('public')->path($path);
+        $absolutePath = Storage::disk('local')->path($path);
 
         // Type fichier
         $mime = @mime_content_type($absolutePath) ?: '';
@@ -240,6 +293,8 @@ class ProductsOrdersController extends Controller
             $p->setAttribute('rx_match_terms', $matchesById[$p->id] ?? []);
         }
 
+        $this->attachDistanceMetadata($orderedPharmacies, $userGeo);
+
         if ($orderedPharmacies->count() === 0) {
             return redirect()->route('produits.commande.pharmacies', $request->only('q'))
                 ->with('error', "⚠️ Aucun partenaire ne dispose des produits détectés sur l’ordonnance.");
@@ -255,6 +310,7 @@ class ProductsOrdersController extends Controller
             'rx_terms'   => $terms,
             'rx_total'   => $totalTerms,
             'rx_only_matches' => true,
+            'userGeo'    => $userGeo,
         ])->with('success', "✅ ".count($terms)." produit(s) détecté(s). ".count($orderedPharmacies)." pharmacie(s) correspondante(s) trouvée(s).");
     }
 
@@ -334,6 +390,38 @@ class ProductsOrdersController extends Controller
         return [$ordered, $scores, $matchesById];
     }
 
+
+    private function productMatchesPrescriptionTerms(string $libelle, array $rxTerms): bool
+    {
+        $libelle = $this->normalizeComparableString($libelle);
+        if ($libelle === '') {
+            return false;
+        }
+
+        foreach ($rxTerms as $term) {
+            $term = $this->normalizeComparableString((string) $term);
+            if ($term !== '' && str_contains($libelle, $term)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function normalizeComparableString(string $value): string
+    {
+        $value = mb_strtolower(trim($value));
+        $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value);
+        if (is_string($ascii) && $ascii !== '') {
+            $value = $ascii;
+        }
+
+        $value = preg_replace('/[^a-z0-9\s\+]/', ' ', $value);
+        $value = preg_replace('/\s+/', ' ', $value);
+
+        return trim((string) $value);
+    }
+
     /**
      * ✅ Extraction texte depuis PDF ou image (OCR).
      */
@@ -364,7 +452,9 @@ class ProductsOrdersController extends Controller
      */
     private function ocrImage(string $imagePath): string
     {
-        if (! $this->commandExists(self::TESSERACT_BIN)) {
+        $tesseract = $this->tesseractBin();
+
+        if (! $this->commandExists($tesseract)) {
             throw new \RuntimeException("OCR indisponible : 'tesseract' n'est pas installé ou pas dans PATH.");
         }
 
@@ -372,7 +462,7 @@ class ProductsOrdersController extends Controller
         @mkdir(dirname($outBase), 0777, true);
 
         $process = new Process([
-            self::TESSERACT_BIN,
+            $tesseract,
             $imagePath,
             $outBase,
             '-l', 'fra+eng',
@@ -403,14 +493,15 @@ class ProductsOrdersController extends Controller
      */
     private function ocrScannedPdf(string $pdfPath): string
     {
-        // pdftoppm peut être absent du PATH -> on autorise chemin complet via constante
-        $pdftoppm = self::PDFTOPPM_BIN;
+        // pdftoppm peut être absent du PATH -> on autorise un chemin complet via .env (PDFTOPPM_BIN)
+        $pdftoppm  = $this->pdftoppmBin();
+        $tesseract = $this->tesseractBin();
 
         if ($pdftoppm === 'pdftoppm' && ! $this->commandExists('pdftoppm')) {
             throw new \RuntimeException("OCR PDF scanné indisponible : 'pdftoppm' (Poppler) n'est pas dans PATH. Ajoute Poppler\\Library\\bin au PATH ou mets le chemin complet dans PDFTOPPM_BIN.");
         }
 
-        if (! $this->commandExists(self::TESSERACT_BIN)) {
+        if (! $this->commandExists($tesseract)) {
             throw new \RuntimeException("OCR PDF scanné indisponible : 'tesseract' n'est pas installé ou pas dans PATH.");
         }
 
@@ -476,6 +567,109 @@ class ProductsOrdersController extends Controller
         $t = preg_replace('/\s*;\s*/u', "\n", $t);
         $t = preg_replace('/\s*\|\s*/u', "\n", $t);
         return trim($t);
+    }
+
+
+    /**
+     * Récupère la position actuelle de l'utilisateur depuis la requête ou la session.
+     */
+    private function resolveCustomerCoordinates(Request $request): ?array
+    {
+        $lat = $request->input('user_latitude', $request->query('user_latitude'));
+        $lng = $request->input('user_longitude', $request->query('user_longitude'));
+
+        $lat = is_numeric($lat) ? (float) $lat : null;
+        $lng = is_numeric($lng) ? (float) $lng : null;
+
+        if ($lat !== null && $lng !== null
+            && $lat >= -90 && $lat <= 90
+            && $lng >= -180 && $lng <= 180) {
+            $geo = [
+                'lat' => round($lat, 7),
+                'lng' => round($lng, 7),
+            ];
+
+            $request->session()->put('customer_geo', $geo);
+
+            return $geo;
+        }
+
+        $geo = $request->session()->get('customer_geo');
+        if (is_array($geo)
+            && isset($geo['lat'], $geo['lng'])
+            && is_numeric($geo['lat'])
+            && is_numeric($geo['lng'])) {
+            return [
+                'lat' => (float) $geo['lat'],
+                'lng' => (float) $geo['lng'],
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Ajoute les informations de distance à chaque pharmacie.
+     */
+    private function attachDistanceMetadata($pharmacies, ?array $userGeo): void
+    {
+        if (! $pharmacies) {
+            return;
+        }
+
+        foreach ($pharmacies as $pharmacy) {
+            $pharmacy->setAttribute('distance_meters', null);
+            $pharmacy->setAttribute('distance_label', null);
+            $pharmacy->setAttribute('distance_available', false);
+
+            if (! $userGeo
+                || ! isset($pharmacy->latitude, $pharmacy->longitude)
+                || ! is_numeric($pharmacy->latitude)
+                || ! is_numeric($pharmacy->longitude)) {
+                continue;
+            }
+
+            $distance = $this->distanceInMeters(
+                (float) $userGeo['lat'],
+                (float) $userGeo['lng'],
+                (float) $pharmacy->latitude,
+                (float) $pharmacy->longitude,
+            );
+
+            $pharmacy->setAttribute('distance_meters', $distance);
+            $pharmacy->setAttribute('distance_label', $this->formatDistance($distance));
+            $pharmacy->setAttribute('distance_available', true);
+        }
+    }
+
+    /**
+     * Distance entre l'utilisateur et la pharmacie en mètres.
+     */
+    private function distanceInMeters(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $earthRadius = 6371000;
+
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLng = deg2rad($lng2 - $lng1);
+
+        $a = sin($dLat / 2) ** 2
+            + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLng / 2) ** 2;
+
+        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+
+        return $earthRadius * $c;
+    }
+
+    /**
+     * Format d'affichage de distance.
+     */
+    private function formatDistance(float $distanceMeters): string
+    {
+        if ($distanceMeters < 1000) {
+            return (string) round($distanceMeters).' m';
+        }
+
+        return number_format($distanceMeters / 1000, 2, ',', ' ').' km';
     }
 
     /**
